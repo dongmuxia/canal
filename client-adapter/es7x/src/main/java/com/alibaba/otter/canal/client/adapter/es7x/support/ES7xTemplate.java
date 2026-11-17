@@ -1,5 +1,6 @@
 package com.alibaba.otter.canal.client.adapter.es7x.support;
 
+import java.io.IOException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.*;
@@ -13,6 +14,7 @@ import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.cluster.metadata.MappingMetaData;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.index.reindex.BulkByScrollResponse;
 import org.elasticsearch.search.SearchHit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,6 +32,7 @@ import com.alibaba.otter.canal.client.adapter.es.core.support.ESBulkRequest.ESUp
 import com.alibaba.otter.canal.client.adapter.es.core.support.ESSyncUtil;
 import com.alibaba.otter.canal.client.adapter.es.core.support.ESTemplate;
 import com.alibaba.otter.canal.client.adapter.es7x.support.ESConnection.ESSearchRequest;
+import com.alibaba.otter.canal.client.adapter.es7x.support.ESConnection.ESDeleteByQueryRequest;
 import com.alibaba.otter.canal.client.adapter.support.DatasourceConfig;
 import com.alibaba.otter.canal.client.adapter.support.Util;
 
@@ -162,6 +165,19 @@ public class ES7xTemplate implements ESTemplate {
     }
 
     @Override
+    public void deleteByQuery(ESMapping mapping, Map<String, Object> params) throws IOException {
+        BoolQueryBuilder boolQueryBuilder = QueryBuilders.boolQuery();
+        params.forEach((fieldName, value) -> boolQueryBuilder.must(QueryBuilders. termQuery(fieldName, value)));
+        ESDeleteByQueryRequest esDeleteByQueryRequest = this.esConnection
+                .new ESDeleteByQueryRequest(mapping.getIndex());
+        esDeleteByQueryRequest.setQuery(boolQueryBuilder);
+        BulkByScrollResponse response = esDeleteByQueryRequest.getResponse();
+        if (!response.getBulkFailures().isEmpty()) {
+            throw new IOException(response.getReasonCancelled());
+        }
+    }
+
+    @Override
     public void commit() {
         if (getBulk().numberOfActions() > 0) {
             ESBulkResponse response = getBulk().bulk();
@@ -247,7 +263,7 @@ public class ES7xTemplate implements ESTemplate {
             }
 
             for (ColumnItem columnItem : fieldItem.getColumnItems()) {
-                if (dmlOld.containsKey(columnItem.getColumnName())
+                if (Objects.isNull(dmlOld) || dmlOld.containsKey(columnItem.getColumnName())
                     && !mapping.getSkips().contains(fieldItem.getFieldName())) {
                     esFieldData.put(Util.cleanColumn(fieldItem.getFieldName()),
                         getValFromRS(mapping, resultSet, fieldItem.getFieldName(), fieldItem.getFieldName()));

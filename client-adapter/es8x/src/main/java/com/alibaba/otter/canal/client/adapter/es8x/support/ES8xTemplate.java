@@ -162,6 +162,11 @@ public class ES8xTemplate implements ESTemplate {
     }
 
     @Override
+    public void deleteByQuery(ESMapping mapping, Map<String, Object> params) {
+
+    }
+
+    @Override
     public void commit() {
         if (getBulk().numberOfActions() > 0) {
             ESBulkResponse response = getBulk().bulk();

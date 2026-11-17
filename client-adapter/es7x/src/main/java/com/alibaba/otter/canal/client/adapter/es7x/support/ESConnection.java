@@ -27,10 +27,7 @@ import org.elasticsearch.action.search.SearchRequestBuilder;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.update.UpdateRequest;
 import org.elasticsearch.action.update.UpdateRequestBuilder;
-import org.elasticsearch.client.RequestOptions;
-import org.elasticsearch.client.RestClient;
-import org.elasticsearch.client.RestClientBuilder;
-import org.elasticsearch.client.RestHighLevelClient;
+import org.elasticsearch.client.*;
 import org.elasticsearch.client.indices.GetMappingsRequest;
 import org.elasticsearch.client.indices.GetMappingsResponse;
 import org.elasticsearch.client.transport.TransportClient;
@@ -38,6 +35,10 @@ import org.elasticsearch.cluster.metadata.MappingMetaData;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.TransportAddress;
 import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.index.reindex.BulkByScrollResponse;
+import org.elasticsearch.index.reindex.DeleteByQueryAction;
+import org.elasticsearch.index.reindex.DeleteByQueryRequest;
+import org.elasticsearch.index.reindex.DeleteByQueryRequestBuilder;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.transport.client.PreBuiltTransportClient;
@@ -351,6 +352,39 @@ public class ESConnection {
 
         public void setDeleteRequest(DeleteRequest deleteRequest) {
             this.deleteRequest = deleteRequest;
+        }
+    }
+
+    public class ESDeleteByQueryRequest {
+
+        private DeleteByQueryRequestBuilder deleteByQueryRequestBuilder;
+
+        private DeleteByQueryRequest deleteByQueryRequest;
+
+        public ESDeleteByQueryRequest(String index) {
+            if (mode == ESClientMode.TRANSPORT) {
+                deleteByQueryRequestBuilder = new DeleteByQueryRequestBuilder(transportClient,
+                        DeleteByQueryAction.INSTANCE);
+            } else {
+                deleteByQueryRequest = new DeleteByQueryRequest(index);
+            }
+        }
+
+        public ESDeleteByQueryRequest setQuery(QueryBuilder queryBuilder) {
+            if (mode == ESClientMode.TRANSPORT) {
+                deleteByQueryRequestBuilder.filter(queryBuilder);
+            } else {
+                deleteByQueryRequest.setQuery(queryBuilder);
+            }
+            return this;
+        }
+
+        public BulkByScrollResponse getResponse() throws IOException {
+            if (mode == ESClientMode.TRANSPORT) {
+                return deleteByQueryRequestBuilder.get();
+            } else {
+                return restHighLevelClient.deleteByQuery(deleteByQueryRequest, RequestOptions.DEFAULT);
+            }
         }
     }
 

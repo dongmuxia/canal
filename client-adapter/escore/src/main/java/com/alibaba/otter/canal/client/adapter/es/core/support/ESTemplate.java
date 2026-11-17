@@ -1,5 +1,6 @@
 package com.alibaba.otter.canal.client.adapter.es.core.support;
 
+import java.io.IOException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Map;
@@ -44,6 +45,8 @@ public interface ESTemplate {
      * @param esFieldData 数据Map
      */
     void delete(ESMapping mapping, Object pkVal, Map<String, Object> esFieldData);
+
+    void deleteByQuery(ESMapping mapping, Map<String, Object> params) throws IOException;
 
     /**
      * 提交批次

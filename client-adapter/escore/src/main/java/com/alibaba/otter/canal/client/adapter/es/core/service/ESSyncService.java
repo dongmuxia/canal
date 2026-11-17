@@ -176,7 +176,7 @@ public class ESSyncService {
                         }
                     } else {
                         // ------关联子表复杂字段插入 执行全sql更新es------
-                        wholeSqlOperation(config, dml, data, null, tableItem);
+                        subTableOperation(config, dml, data, tableItem);
                     }
                 }
             }
@@ -230,38 +230,39 @@ public class ESSyncService {
                         }
                     }
 
-                    // 不支持主键更新!!
-
-                    // 判断是否有外键更新
-                    boolean fkChanged = false;
-                    for (TableItem tableItem : schemaItem.getAliasTableItems().values()) {
-                        if (tableItem.isMain()) {
-                            continue;
-                        }
-                        boolean changed = false;
-                        for (List<FieldItem> fieldItems : tableItem.getRelationTableFields().values()) {
-                            for (FieldItem fieldItem : fieldItems) {
-                                if (old.containsKey(fieldItem.getColumn().getColumnName())) {
-                                    fkChanged = true;
-                                    changed = true;
-                                    break;
+                    // 判断是否主键更新
+                    if (old.keySet().stream().anyMatch(dml.getPkNames()::contains)) {
+                        mainTableUpdatePk(config, dml, data, old);
+                    } else {
+                        // 判断是否有外键更新
+                        boolean fkChanged = false;
+                        for (TableItem tableItem : schemaItem.getAliasTableItems().values()) {
+                            if (tableItem.isMain()) {
+                                continue;
+                            }
+                            for (List<FieldItem> fieldItems : tableItem.getRelationTableFields().values()) {
+                                for (FieldItem fieldItem : fieldItems) {
+                                    if (old.containsKey(fieldItem.getColumn().getColumnName())) {
+                                        fkChanged = true;
+                                        break;
+                                    }
                                 }
                             }
-                        }
-                        // 如果外键有修改,则更新所对应该表的所有查询条件数据
-                        if (changed) {
-                            for (FieldItem fieldItem : tableItem.getRelationSelectFieldItems()) {
-                                fieldItem.getColumnItems()
-                                    .forEach(columnItem -> old.put(columnItem.getColumnName(), null));
+                            // 如果外键有修改,则更新所对应该表的所有查询条件数据
+                            if (fkChanged) {
+                                mainTableUpdatePk(config, dml, data, old);
+                                break;
                             }
                         }
-                    }
 
-                    // 判断主键和所更新的字段是否全为简单字段
-                    if (idFieldSimple && allUpdateFieldSimple && !fkChanged) {
-                        singleTableSimpleFiledUpdate(config, schemaItem.getMainTable().getAlias(), dml, data, old);
-                    } else {
-                        mainTableUpdate(config, dml, data, old);
+                        if (!fkChanged) {
+                            // 判断主键和所更新的字段是否全为简单字段
+                            if (idFieldSimple && allUpdateFieldSimple) {
+                                singleTableSimpleFiledUpdate(config, schemaItem.getMainTable().getAlias(), dml, data, old);
+                            } else {
+                                mainTableUpdate(config, dml, data, old);
+                            }
+                        }
                     }
                 }
 
@@ -356,7 +357,7 @@ public class ESSyncService {
                     } else {
                         // ------主键带函数, 查询sql获取主键删除------
                         // FIXME 删除时反查sql为空记录, 无法获获取 id field 值
-                        mainTableDelete(config, dml, data);
+                        mainTableDeleteEs(config, dml, data);
                     }
                 } else {
                     FieldItem pkFieldItem = schemaItem.getIdFieldItem(mapping);
@@ -416,7 +417,7 @@ public class ESSyncService {
                     }
                 } else {
                     // ------关联子表复杂字段更新 执行全sql更新es------
-                    wholeSqlOperation(config, dml, data, null, tableItem);
+                    subTableOperation(config, dml, data, tableItem);
                 }
             }
         }
@@ -529,6 +530,29 @@ public class ESSyncService {
             }
             return 0;
         });
+    }
+
+    private void mainTableDeleteEs(ESSyncConfig config, Dml dml, Map<String, Object> data) {
+        ESMapping mapping = config.getEsMapping();
+        try {
+            List<String> pkNames = dml.getPkNames();
+            Map<String, Object> params = new LinkedHashMap<>();
+            SchemaItem schemaItem = mapping.getSchemaItem();
+            for (String pkName : pkNames) {
+                for (Map.Entry<String, FieldItem> entry : schemaItem.getSelectFields().entrySet()) {
+                    FieldItem fieldItem = entry.getValue();
+                    if (!fieldItem.isMethod() && !fieldItem.isBinaryOp()) {
+                        ColumnItem columnItem = fieldItem.getColumn();
+                        if (columnItem.getOwner().equals(schemaItem.getMainTable().getAlias()) && columnItem.getColumnName().equals(pkName)) {
+                            params.put(entry.getKey(), esTemplate.getValFromData(mapping, data, entry.getKey(), pkName));
+                        }
+                    }
+                }
+            }
+            esTemplate.deleteByQuery(mapping, params);
+        } catch (Exception e) {
+            logger.error("Error when delete by query", e);
+        }
     }
 
     /**
@@ -798,6 +822,90 @@ public class ESSyncService {
         });
     }
 
+    private void subTableOperation(ESSyncConfig config, Dml dml, Map<String, Object> data, TableItem tableItem) {
+        ESMapping mapping = config.getEsMapping();
+        // 防止最后出现groupby 导致sql解析异常
+        String[] sqlSplit = mapping.getSql().split("GROUP\\ BY(?!(.*)ON)");
+        String sqlNoWhere = sqlSplit[0];
+
+        String sqlGroupBy = "";
+
+        if (sqlSplit.length > 1) {
+            sqlGroupBy = "GROUP BY " + sqlSplit[1];
+        }
+
+        StringBuilder sql = new StringBuilder(sqlNoWhere + " WHERE ");
+
+        Map<String, Object> params = new HashMap<>();
+        for (Map.Entry<FieldItem, List<FieldItem>> fieldItemListEntry : tableItem.getRelationTableFields().entrySet()) {
+            ColumnItem columnItem = fieldItemListEntry.getKey().getColumn();
+            String columnName = columnItem.getColumnName();
+            Object value = esTemplate.getValFromData(mapping, data, fieldItemListEntry.getKey().getFieldName(), columnName);
+            fieldItemListEntry.getValue().forEach(fieldItem -> {
+                if (!fieldItem.isMethod() && !fieldItem.isBinaryOp()) {
+                    params.put(fieldItem.getFieldName(), value);
+                }
+            });
+            String tableName = tableItem.getAlias();
+            if (columnItem.getOwner().equals(tableItem.getAlias())) {
+                for (int i = 0; i < tableItem.getRelationFields().size(); i++) {
+                    SchemaItem.RelationFieldsPair relationFieldsPair = tableItem.getRelationFields().get(i);
+                    if (relationFieldsPair.getLeftFieldItem().getFieldName().equals(columnName) && relationFieldsPair.getLeftFieldItem().getOwner().equals(tableName)) {
+                        tableName = relationFieldsPair.getRightFieldItem().getOwner();
+                        columnName = relationFieldsPair.getRightFieldItem().getColumn().getColumnName();
+                        break;
+                    } else if (relationFieldsPair.getRightFieldItem().getFieldName().equals(columnName) && relationFieldsPair.getRightFieldItem().getOwner().equals(tableName)) {
+                        tableName = relationFieldsPair.getLeftFieldItem().getOwner();
+                        columnName = relationFieldsPair.getLeftFieldItem().getColumn().getColumnName();
+                        break;
+                    }
+                    if (i == tableItem.getRelationFields().size() - 1) {
+                        throw new RuntimeException("column not found");
+                    }
+                }
+            }
+            ESSyncUtil.appendCondition(sql, value, tableName, columnName);
+        }
+        try {
+            esTemplate.deleteByQuery(mapping, params);
+        } catch (Exception e) {
+            logger.error("deleteByQuery error", e);
+        }
+        int len = sql.length();
+        sql.delete(len - 5, len);
+        sql.append(sqlGroupBy);
+
+        DataSource ds = DatasourceConfig.DATA_SOURCES.get(config.getDataSourceKey());
+        if (logger.isTraceEnabled()) {
+            logger.trace("Join table update es index by query whole sql, destination:{}, table: {}, index: {}, sql: {}",
+                    config.getDestination(),
+                    dml.getTable(),
+                    mapping.getIndex(),
+                    sql.toString().replace("\n", " "));
+        }
+        Util.sqlRS(ds, sql.toString(), rs -> {
+            try {
+                while (rs.next()) {
+                    Map<String, Object> esFieldData = new LinkedHashMap<>();
+                    Object idVal = esTemplate.getESDataFromRS(mapping, rs, esFieldData);
+
+                    if (logger.isTraceEnabled()) {
+                        logger.trace(
+                                "Main table insert to es index by query sql, destination:{}, table: {}, index: {}, id: {}",
+                                config.getDestination(),
+                                dml.getTable(),
+                                mapping.getIndex(),
+                                idVal);
+                    }
+                    esTemplate.insert(mapping, idVal, esFieldData);
+                }
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+            return 0;
+        });
+    }
+
     /**
      * 单表简单字段update
      *
@@ -858,6 +966,72 @@ public class ESSyncService {
                             idVal);
                     }
                     esTemplate.update(mapping, idVal, esFieldData);
+                }
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+            return 0;
+        });
+    }
+
+    /**
+     * 主表(单表)主键update
+     *
+     * @param config es配置
+     * @param dml dml信息
+     * @param data 单行dml数据
+     */
+    private void mainTableUpdatePk(ESSyncConfig config, Dml dml, Map<String, Object> data, Map<String, Object> old) {
+        ESMapping mapping = config.getEsMapping();
+        String sql = mapping.getSql();
+        String condition = ESSyncUtil.pkConditionSql(mapping, data);
+        sql = ESSyncUtil.appendCondition(sql, condition);
+        DataSource ds = DatasourceConfig.DATA_SOURCES.get(config.getDataSourceKey());
+        if (logger.isTraceEnabled()) {
+            logger.trace("Main table update to es index by query sql, destination:{}, table: {}, index: {}, sql: {}",
+                    config.getDestination(),
+                    dml.getTable(),
+                    mapping.getIndex(),
+                    sql.replace("\n", " "));
+        }
+        try {
+            List<String> pkNames = dml.getPkNames();
+            Map<String, Object> params = new LinkedHashMap<>();
+            SchemaItem schemaItem = mapping.getSchemaItem();
+            for (String pkName : pkNames) {
+                for (Map.Entry<String, FieldItem> entry : schemaItem.getSelectFields().entrySet()) {
+                    FieldItem fieldItem = entry.getValue();
+                    if (!fieldItem.isMethod() && !fieldItem.isBinaryOp()) {
+                        ColumnItem columnItem = fieldItem.getColumn();
+                        if (columnItem.getOwner().equals(schemaItem.getMainTable().getAlias()) && columnItem.getColumnName().equals(pkName)) {
+                            if (old.containsKey(pkName)) {
+                                params.put(entry.getKey(), esTemplate.getValFromData(mapping, old, entry.getKey(), pkName));
+                            } else {
+                                params.put(entry.getKey(), esTemplate.getValFromData(mapping, data, entry.getKey(), pkName));
+                            }
+                        }
+                    }
+                }
+            }
+            esTemplate.deleteByQuery(mapping, params);
+        } catch (Exception e) {
+            logger.error("Error when delete by query", e);
+        }
+        Util.sqlRS(ds, sql, rs -> {
+            try {
+                while (rs.next()) {
+                    Map<String, Object> esFieldData = new LinkedHashMap<>();
+                    Object idVal = esTemplate.getESDataFromRS(mapping, rs, esFieldData);
+
+                    if (logger.isTraceEnabled()) {
+                        logger.trace(
+                                "Main table update to es index by query sql, destination:{}, table: {}, index: {}, id: {}",
+                                config.getDestination(),
+                                dml.getTable(),
+                                mapping.getIndex(),
+                                idVal);
+                    }
+                    esTemplate.insert(mapping, idVal, esFieldData);
                 }
             } catch (Exception e) {
                 throw new RuntimeException(e);
